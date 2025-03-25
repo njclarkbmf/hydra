@@ -1,0 +1,85 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment:
+      - LANCEDB_PATH=/data/lancedb
+      - MODELS_DIR=/data/models
+      - TEMP_DIR=/data/temp
+      - N8N_BASE_URL=http://n8n:5678/webhook/
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - ENABLE_AB_TESTING=${ENABLE_AB_TESTING:-false}
+      - ENABLE_DRIFT_DETECTION=${ENABLE_DRIFT_DETECTION:-false}
+      - ENABLE_EXPERIMENT_TRACKING=${ENABLE_EXPERIMENT_TRACKING:-false}
+      - ENABLE_AUTOMATIC_RETRAINING=${ENABLE_AUTOMATIC_RETRAINING:-false}
+      - ENABLE_MODEL_MONITORING=${ENABLE_MODEL_MONITORING:-true}
+      - DEFAULT_MODEL_TYPE=${DEFAULT_MODEL_TYPE:-classifier}
+      - DEFAULT_EMBEDDING_MODEL=${DEFAULT_EMBEDDING_MODEL:-all-MiniLM-L6-v2}
+    volumes:
+      - data-volume:/data
+    depends_on:
+      - n8n
+    networks:
+      - mlops-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  n8n:
+    image: n8nio/n8n:latest
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - N8N_HOST=n8n
+      - NODE_ENV=production
+      - WEBHOOK_URL=http://n8n:5678/
+      - GENERIC_TIMEZONE=${TZ:-UTC}
+    volumes:
+      - n8n-data:/home/node/.n8n
+      - ./workflows:/home/node/.n8n/workflows
+    networks:
+      - mlops-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "http://localhost:5678/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  # Optional: Add a database service if needed
+  # postgres:
+  #   image: postgres:13
+  #   environment:
+  #     - POSTGRES_USER=${DB_USER:-postgres}
+  #     - POSTGRES_PASSWORD=${DB_PASSWORD:-password}
+  #     - POSTGRES_DB=${DB_NAME:-mlops}
+  #   volumes:
+  #     - postgres-data:/var/lib/postgresql/data
+  #   networks:
+  #     - mlops-network
+  #   restart: unless-stopped
+
+volumes:
+  data-volume:
+    name: ${DOCKER_DATA_VOLUME:-lancedb-mlops-data}
+  n8n-data:
+    name: ${DOCKER_N8N_VOLUME:-lancedb-mlops-n8n}
+  # postgres-data:
+  #   name: ${DOCKER_POSTGRES_VOLUME:-lancedb-mlops-postgres}
+
+networks:
+  mlops-network:
+    name: ${DOCKER_NETWORK_NAME:-lancedb-mlops-network}
+    driver: bridge

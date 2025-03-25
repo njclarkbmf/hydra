@@ -1,0 +1,81 @@
+{
+  "name": "A/B Testing Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "create-ab-test",
+        "options": {}
+      },
+      "id": "0827b10d-bc97-48ae-9b09-0910b8f8c0c4",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        250,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse the input\nconst model_a_id = $input.body.model_a_id;\nconst model_b_id = $input.body.model_b_id;\nconst test_name = $input.body.test_name;\nconst traffic_split = $input.body.traffic_split || 0.5;\nconst lancedb_path = $input.body.lancedb_path;\n\n// Import required modules\nconst lancedb = require('lancedb');\nconst { v4: uuidv4 } = require('uuid');\n\n// Function to get model from registry\nasync function getModel(db, model_id) {\n  // Open the model registry table\n  if (!db.tableNames().includes('model_registry')) {\n    throw new Error('Model registry not found');\n  }\n  \n  const registry = db.openTable('model_registry');\n  \n  // Query for the model\n  const query = registry.filter(`model_id = '${model_id}'`);\n  \n  // Get the models\n  const models = await query.toArray();\n  \n  if (models.length === 0) {\n    throw new Error(`Model ${model_id} not found`);\n  }\n  \n  // Get the latest version\n  models.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));\n  return models[0];\n}\n\n// Main execution function\nasync function createABTest() {\n  try {\n    // Check if A/B testing is enabled\n    const enableABTesting = process.env.ENABLE_AB_TESTING === 'true';\n    if (!enableABTesting) {\n      return {\n        status: 'error',\n        message: 'A/B testing is disabled. Enable it in the configuration to use this feature.'\n      };\n    }\n    \n    // Connect to LanceDB\n    const db = await lancedb.connect(lancedb_path);\n    \n    // Verify both models exist\n    const model_a = await getModel(db, model_a_id);\n    const model_b = await getModel(db, model_b_id);\n    \n    // Create ab_tests table if it doesn't exist\n    if (!db.tableNames().includes('ab_tests')) {\n      await db.createTable('ab_tests', []);\n    }\n    \n    const testsTable = db.openTable('ab_tests');\n    \n    // Check if a test with the same name already exists\n    const existingTests = await testsTable.filter(`test_name = '${test_name}'`).toArray();\n    if (existingTests.length > 0) {\n      return {\n        status: 'error',\n        message: `A test with name '${test_name}' already exists`\n      };\n    }\n    \n    // Generate a unique test ID\n    const test_id = uuidv4();\n    const timestamp = new Date().toISOString();\n    \n    // Create the A/B test record\n    const testRecord = {\n      test_id: test_id,\n      test_name: test_name,\n      model_a_id: model_a_id,\n      model_a_version: model_a.version,\n      model_b_id: model_b_id,\n      model_b_version: model_b.version,\n      traffic_split: traffic_split,\n      start_date: timestamp,\n      end_date: null,\n      status: 'active',\n      metrics: JSON.stringify({\n        model_a_predictions: 0,\n        model_b_predictions: 0,\n        model_a_accuracy: null,\n        model_b_accuracy: null\n      }),\n      metadata: JSON.stringify({\n        created_by: 'api',\n        model_a_type: model_a.model_type,\n        model_b_type: model_b.model_type\n      }),\n      vector: model_a.vector  // Use model A's vector for similarity searches\n    };\n    \n    // Add the record to the table\n    await testsTable.add([testRecord]);\n    \n    // Create an entry in the monitoring table if it exists\n    if (db.tableNames().includes('model_monitoring')) {\n      const monitoringTable = db.openTable('model_monitoring');\n      \n      // Create monitoring entries for both models\n      await monitoringTable.add([\n        {\n          id: `ab_test_${test_id}_model_a`,\n          timestamp: timestamp,\n          model_id: model_a_id,\n          version: model_a.version,\n          metric_type: 'ab_test_start',\n          metric_value: traffic_split,\n          threshold: null,\n          status: 'active',\n          metadata: JSON.stringify({\n            test_id: test_id,\n            test_name: test_name,\n            role: 'model_a',\n            traffic_split: traffic_split\n          }),\n          vector: model_a.vector\n        },\n        {\n          id: `ab_test_${test_id}_model_b`,\n          timestamp: timestamp,\n          model_id: model_b_id,\n          version: model_b.version,\n          metric_type: 'ab_test_start',\n          metric_value: 1 - traffic_split,\n          threshold: null,\n          status: 'active',\n          metadata: JSON.stringify({\n            test_id: test_id,\n            test_name: test_name,\n            role: 'model_b',\n            traffic_split: 1 - traffic_split\n          }),\n          vector: model_b.vector\n        }\n      ]);\n    }\n    \n    return {\n      status: 'success',\n      test_id: test_id,\n      test_name: test_name,\n      model_a_id: model_a_id,\n      model_a_version: model_a.version,\n      model_b_id: model_b_id,\n      model_b_version: model_b.version,\n      traffic_split: traffic_split,\n      start_date: timestamp\n    };\n  } catch (error) {\n    return {\n      status: 'error',\n      message: error.message,\n      stack: error.stack\n    };\n  }\n}\n\n// Execute the A/B test creation\nreturn createABTest();"
+      },
+      "id": "5fc99ebd-fc14-4c2a-a2f1-e7ebb0ace30a",
+      "name": "Code",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        450,
+        300
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "ff81ad7c-c773-41b1-a345-5f31f4b5f6c9",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        650,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Code",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {},
+  "versionId": "0ed405f1-21bb-4f5f-b73f-0b15c2d72fa6",
+  "id": "5",
+  "meta": {
+    "instanceId": "104a4d37d8df52d53fbaff292ea28e9406991bd34179d95537c3cb456b38d5bc"
+  },
+  "tags": [
+    {
+      "name": "MLOps",
+      "id": "1"
+    }
+  ]
+}

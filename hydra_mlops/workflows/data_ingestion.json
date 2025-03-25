@@ -1,0 +1,81 @@
+{
+  "name": "Data Ingestion Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ingest-data",
+        "options": {}
+      },
+      "id": "13ae0de5-2a6b-42ec-a2f9-098be472d8bb",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        250,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse the input\nconst connector_type = $input.body.connector_type;\nconst connector_params = $input.body.connector_params;\nconst query_params = $input.body.query_params || {};\nconst lancedb_path = $input.body.lancedb_path;\nconst table_name = $input.body.table_name;\n\n// Import required modules\nconst lancedb = require('lancedb');\nconst { SentenceTransformer } = require('sentence-transformers');\nconst fs = require('fs');\nconst path = require('path');\n\n// Function to dynamically import the appropriate connector\nasync function getConnector(type, params) {\n  // In a real implementation, you would dynamically import the connector module\n  // Here, we'll implement a simplified version for CSV and API connectors\n  if (type === 'csv') {\n    return {\n      connect: async () => true,\n      fetch_data: async () => {\n        // Read CSV file\n        const csv = fs.readFileSync(params.file_path, 'utf-8');\n        \n        // Parse CSV\n        const lines = csv.split('\\n');\n        const headers = lines[0].split(',');\n        \n        const data = [];\n        for (let i = 1; i < lines.length; i++) {\n          if (lines[i].trim() === '') continue;\n          \n          const values = lines[i].split(',');\n          const row = {};\n          \n          for (let j = 0; j < headers.length; j++) {\n            row[headers[j].trim()] = values[j] ? values[j].trim() : null;\n          }\n          \n          data.push(row);\n        }\n        \n        return data;\n      },\n      transform_to_vectors: async (data, model) => {\n        const textColumn = params.text_column || Object.keys(data[0]).find(k => typeof data[0][k] === 'string');\n        \n        if (!textColumn) {\n          throw new Error('No text column found for embedding generation');\n        }\n        \n        // Generate embeddings\n        for (const row of data) {\n          const text = row[textColumn] || '';\n          row.vector = await model.encode(text);\n        }\n        \n        return data;\n      }\n    };\n  } else if (type === 'api') {\n    return {\n      connect: async () => true,\n      fetch_data: async () => {\n        // Make API request\n        const response = await fetch(params.url, {\n          method: params.method || 'GET',\n          headers: params.headers || {},\n          body: params.method !== 'GET' && params.body ? JSON.stringify(params.body) : undefined\n        });\n        \n        const data = await response.json();\n        return params.json_path ? jsonPath(data, params.json_path) : data;\n      },\n      transform_to_vectors: async (data, model) => {\n        const textField = params.text_field || Object.keys(data[0]).find(k => typeof data[0][k] === 'string');\n        \n        if (!textField) {\n          throw new Error('No text field found for embedding generation');\n        }\n        \n        // Generate embeddings\n        for (const row of data) {\n          const text = row[textField] || '';\n          row.vector = await model.encode(text);\n        }\n        \n        return data;\n      }\n    };\n  }\n  \n  throw new Error(`Unsupported connector type: ${type}`);\n}\n\n// Helper function to extract data using JSONPath\nfunction jsonPath(obj, path) {\n  const parts = path.split('.');\n  let current = obj;\n  \n  for (const part of parts) {\n    if (current[part] === undefined) {\n      return [];\n    }\n    current = current[part];\n  }\n  \n  return Array.isArray(current) ? current : [current];\n}\n\n// Main execution function\nasync function ingestData() {\n  try {\n    // Initialize embedding model\n    const model = new SentenceTransformer();\n    \n    // Get the appropriate connector\n    const connector = await getConnector(connector_type, connector_params);\n    \n    // Connect to data source\n    await connector.connect();\n    \n    // Fetch data\n    const rawData = await connector.fetch_data(query_params);\n    \n    // Transform to vectors\n    const dataWithVectors = await connector.transform_to_vectors(rawData, model);\n    \n    // Connect to LanceDB\n    const db = await lancedb.connect(lancedb_path);\n    \n    // Create or update table\n    let table;\n    if (db.tableNames().includes(table_name)) {\n      // Open existing table\n      table = db.openTable(table_name);\n      // Add new data\n      await table.add(dataWithVectors);\n    } else {\n      // Create new table\n      table = await db.createTable(table_name, dataWithVectors);\n    }\n    \n    return {\n      status: 'success',\n      rows_processed: dataWithVectors.length,\n      table_name: table_name\n    };\n  } catch (error) {\n    return {\n      status: 'error',\n      message: error.message,\n      stack: error.stack\n    };\n  }\n}\n\n// Execute the data ingestion\nreturn ingestData();"
+      },
+      "id": "1fc99ebd-fc14-4c2a-a2f1-e7ebb0ace30a",
+      "name": "Code",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        450,
+        300
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "bf81ad7c-c773-41b1-a345-5f31f4b5f6c9",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        650,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Code",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {},
+  "versionId": "6ed405f1-21bb-4f5f-b73f-0b15c2d72fa6",
+  "id": "1",
+  "meta": {
+    "instanceId": "104a4d37d8df52d53fbaff292ea28e9406991bd34179d95537c3cb456b38d5bc"
+  },
+  "tags": [
+    {
+      "name": "MLOps",
+      "id": "1"
+    }
+  ]
+}

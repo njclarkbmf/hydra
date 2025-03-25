@@ -1,0 +1,81 @@
+{
+  "name": "Model Inference Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "predict",
+        "options": {}
+      },
+      "id": "7827b10d-bc97-48ae-9b09-0910b8f8c0c4",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        250,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse the input\nconst model_id = $input.body.model_id;\nconst features = $input.body.features;\nconst version = $input.body.version || null;\nconst lancedb_path = $input.body.lancedb_path;\n\n// Import required modules\nconst lancedb = require('lancedb');\nconst fs = require('fs');\nconst path = require('path');\nconst { exec } = require('child_process');\nconst { v4: uuidv4 } = require('uuid');\n\n// Helper function to run Python code for model inference\nasync function predictWithPython(model_path, features) {\n  return new Promise((resolve, reject) => {\n    // Write features to temporary file\n    const tempFeaturesFile = path.join('./temp', `features_${Date.now()}.json`);\n    fs.writeFileSync(tempFeaturesFile, JSON.stringify(features));\n    \n    // Generate Python script for inference\n    const pythonScript = `\nimport json\nimport pickle\nimport numpy as np\n\n# Load features\nwith open('${tempFeaturesFile}', 'r') as f:\n    features = json.load(f)\n\n# Convert to numpy array\nX = np.array(features)\n\n# Load the model\nwith open('${model_path}', 'rb') as f:\n    model = pickle.load(f)\n\n# Make predictions\npredictions = model.predict(X).tolist()\n\n# Check if model supports probability estimation\nhas_proba = hasattr(model, 'predict_proba')\nproba = None\nif has_proba:\n    proba = model.predict_proba(X).tolist()\n\n# Output results\nresult = {\n    'predictions': predictions,\n    'probabilities': proba\n}\nwith open('${path.join('./temp', `results_${Date.now()}.json`)}', 'w') as f:\n    json.dump(result, f)\n`;\n    \n    // Write Python script to file\n    const scriptFile = path.join('./temp', `inference_script_${Date.now()}.py`);\n    fs.writeFileSync(scriptFile, pythonScript);\n    \n    // Execute Python script\n    exec(`python ${scriptFile}`, (error, stdout, stderr) => {\n      if (error) {\n        console.error(`Execution error: ${error}`);\n        reject(error);\n        return;\n      }\n      \n      if (stderr) {\n        console.error(`Python stderr: ${stderr}`);\n      }\n      \n      // Read results\n      const resultsFile = glob.sync(path.join('./temp', 'results_*.json'))[0];\n      if (!resultsFile) {\n        reject(new Error('Results file not found'));\n        return;\n      }\n      \n      const results = JSON.parse(fs.readFileSync(resultsFile, 'utf-8'));\n      \n      // Clean up temporary files\n      fs.unlinkSync(tempFeaturesFile);\n      fs.unlinkSync(scriptFile);\n      fs.unlinkSync(resultsFile);\n      \n      resolve(results);\n    });\n  });\n}\n\n// Function to get model from registry\nasync function getModel(db, model_id, version) {\n  // Open the model registry table\n  if (!db.tableNames().includes('model_registry')) {\n    throw new Error('Model registry not found');\n  }\n  \n  const registry = db.openTable('model_registry');\n  \n  // Query for the model\n  let query = registry.filter(`model_id = '${model_id}'`);\n  if (version) {\n    query = query.filter(`version = '${version}'`);\n  }\n  \n  // Get the models\n  const models = await query.toArray();\n  \n  if (models.length === 0) {\n    throw new Error(`Model ${model_id}${version ? ` version ${version}` : ''} not found`);\n  }\n  \n  // Get the latest version if no specific version was requested\n  if (!version) {\n    // Sort by created_at (descending)\n    models.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));\n  }\n  \n  return models[0];\n}\n\n// Main execution function\nasync function predictWithModel() {\n  try {\n    // Connect to LanceDB\n    const db = await lancedb.connect(lancedb_path);\n    \n    // Get the model from registry\n    const model = await getModel(db, model_id, version);\n    \n    // Make predictions\n    const results = await predictWithPython(model.model_path, features);\n    \n    // Log the inference\n    const timestamp = new Date().toISOString();\n    const inference_id = uuidv4();\n    \n    // Create prediction_logs table if it doesn't exist\n    if (!db.tableNames().includes('prediction_logs')) {\n      await db.createTable('prediction_logs', []);\n    }\n    \n    const logsTable = db.openTable('prediction_logs');\n    \n    // Calculate mean of feature vectors for logging\n    const meanFeature = features.length > 0 && Array.isArray(features[0]) ?\n      features.reduce((acc, val) => acc.map((x, i) => x + val[i]), Array(features[0].length).fill(0))\n        .map(x => x / features.length) :\n      features;\n    \n    // Add log entry\n    await logsTable.add([{\n      id: inference_id,\n      timestamp: timestamp,\n      model_id: model_id,\n      version: model.version,\n      features: JSON.stringify(features),\n      predictions: JSON.stringify(results.predictions),\n      probabilities: results.probabilities ? JSON.stringify(results.probabilities) : null,\n      ground_truth: null,  // Will be updated later if feedback is provided\n      metadata: JSON.stringify({\n        inference_type: 'api',\n        includes_probabilities: results.probabilities !== null\n      }),\n      vector: meanFeature\n    }]);\n    \n    return {\n      status: 'success',\n      inference_id: inference_id,\n      model_id: model_id,\n      version: model.version,\n      predictions: results.predictions,\n      probabilities: results.probabilities\n    };\n  } catch (error) {\n    return {\n      status: 'error',\n      message: error.message,\n      stack: error.stack\n    };\n  }\n}\n\n// Execute the model inference\nreturn predictWithModel();"
+      },
+      "id": "3fc99ebd-fc14-4c2a-a2f1-e7ebb0ace30a",
+      "name": "Code",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        450,
+        300
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "df81ad7c-c773-41b1-a345-5f31f4b5f6c9",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        650,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Code",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {},
+  "versionId": "8ed405f1-21bb-4f5f-b73f-0b15c2d72fa6",
+  "id": "3",
+  "meta": {
+    "instanceId": "104a4d37d8df52d53fbaff292ea28e9406991bd34179d95537c3cb456b38d5bc"
+  },
+  "tags": [
+    {
+      "name": "MLOps",
+      "id": "1"
+    }
+  ]
+}

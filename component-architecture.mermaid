@@ -1,0 +1,165 @@
+classDiagram
+    class DataConnector {
+        <<abstract>>
+        +connect() bool
+        +fetch_data(query_params) DataFrame
+        +transform_to_vectors(data, embedding_model) DataFrame
+        +process(query_params, embedding_model) DataFrame
+    }
+    
+    class CSVConnector {
+        -file_path str
+        -text_columns List[str]
+        -delimiter str
+        -encoding str
+        -embedding_model_name str
+        +connect() bool
+        +fetch_data(query_params) DataFrame
+        +transform_to_vectors(data, embedding_model) DataFrame
+    }
+    
+    class DatabaseConnector {
+        -connection_string str
+        -host str
+        -port int
+        -user str
+        -password str
+        -database str
+        -table str
+        -query str
+        -text_columns List[str]
+        -embedding_model_name str
+        +connect() bool
+        +fetch_data(query_params) DataFrame
+        +transform_to_vectors(data, embedding_model) DataFrame
+    }
+    
+    class APIConnector {
+        -url str
+        -method str
+        -headers Dict
+        -auth Dict
+        -json_path str
+        -text_fields List[str]
+        -embedding_model_name str
+        +connect() bool
+        +fetch_data(query_params) DataFrame
+        +transform_to_vectors(data, embedding_model) DataFrame
+    }
+    
+    class ModelTrainer {
+        <<abstract>>
+        +train(features, labels) Any
+        +evaluate(features, labels) Dict
+        +save(path) None
+        +load(path) Any
+    }
+    
+    class ClassifierTrainer {
+        -classifier_type str
+        -model_params Dict
+        -test_size float
+        -random_state int
+        -model Any
+        +train(features, labels, validation_split) Any
+        +evaluate(features, labels) Dict
+        +save(path) None
+        +load(path) Any
+        +predict(features) ndarray
+        +predict_proba(features) ndarray
+    }
+    
+    class RegressorTrainer {
+        -regressor_type str
+        -model_params Dict
+        -test_size float
+        -random_state int
+        -model Any
+        +train(features, targets, validation_split) Any
+        +evaluate(features, targets) Dict
+        +save(path) None
+        +load(path) Any
+        +predict(features) ndarray
+    }
+    
+    class ModelRegistry {
+        <<abstract>>
+        +register_model(model_id, version, metrics, model_path, vector, metadata) None
+        +get_model(model_id, version) Dict
+        +list_models() List[Dict]
+        +list_versions(model_id) List[Dict]
+        +delete_model(model_id, version) None
+        +find_similar_models(vector, limit) List[Dict]
+    }
+    
+    class LanceDBModelRegistry {
+        -db_path str
+        -_db LanceDB
+        -_table Table
+        +register_model(model_id, version, metrics, model_path, vector, metadata) None
+        +get_model(model_id, version) Dict
+        +list_models() List[Dict]
+        +list_versions(model_id) List[Dict]
+        +delete_model(model_id, version) None
+        +find_similar_models(vector, limit) List[Dict]
+    }
+    
+    class ModelServer {
+        <<abstract>>
+        +load_model(model_id, version) Dict
+        +predict(model_id, features, version) ndarray
+        +log_prediction(model_id, version, features, predictions, ground_truth) None
+        +get_prediction_logs(model_id, version, limit) List[Dict]
+    }
+    
+    class LanceDBModelServer {
+        -db_path str
+        -registry LanceDBModelRegistry
+        -loaded_models Dict
+        -_db LanceDB
+        -_logs_table Table
+        +load_model(model_id, version) Dict
+        +predict(model_id, features, version, log_prediction) ndarray
+        +log_prediction(model_id, version, features, predictions, ground_truth, metadata) None
+        +get_prediction_logs(model_id, version, limit) List[Dict]
+        +predict_proba(model_id, features, version, log_prediction) ndarray
+        +get_model_performance(model_id, version) Dict
+    }
+    
+    class ModelMonitor {
+        <<abstract>>
+        +detect_drift(model_id, reference_data, current_data, version) Dict
+        +monitor_performance(model_id, threshold, version) Dict
+        +trigger_retraining(model_id, version) Dict
+    }
+    
+    class LanceDBModelMonitor {
+        -db_path str
+        -registry LanceDBModelRegistry
+        -server LanceDBModelServer
+        -_db LanceDB
+        -_monitor_table Table
+        +detect_drift(model_id, reference_data, current_data, version, drift_threshold) Dict
+        +monitor_performance(model_id, threshold, version, metric_name) Dict
+        +trigger_retraining(model_id, version, training_data) Dict
+        -_log_metric(model_id, version, metric_type, metric_value, threshold, status, metadata, vector) None
+        -_update_metric_log(model_id, version, metric_type, status, metadata) None
+        +get_monitoring_logs(model_id, version, metric_type, status, limit) List[Dict]
+    }
+    
+    DataConnector <|-- CSVConnector
+    DataConnector <|-- DatabaseConnector
+    DataConnector <|-- APIConnector
+    
+    ModelTrainer <|-- ClassifierTrainer
+    ModelTrainer <|-- RegressorTrainer
+    
+    ModelRegistry <|-- LanceDBModelRegistry
+    
+    ModelServer <|-- LanceDBModelServer
+    
+    ModelMonitor <|-- LanceDBModelMonitor
+    
+    LanceDBModelServer --> LanceDBModelRegistry: uses
+    LanceDBModelMonitor --> LanceDBModelRegistry: uses
+    LanceDBModelMonitor --> LanceDBModelServer: uses

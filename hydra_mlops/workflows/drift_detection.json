@@ -1,0 +1,81 @@
+{
+  "name": "Drift Detection Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "detect-drift",
+        "options": {}
+      },
+      "id": "9827b10d-bc97-48ae-9b09-0910b8f8c0c4",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        250,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse the input\nconst model_id = $input.body.model_id;\nconst reference_table = $input.body.reference_table;\nconst current_table = $input.body.current_table;\nconst lancedb_path = $input.body.lancedb_path;\nconst drift_threshold = $input.body.drift_threshold || 0.05;\n\n// Import required modules\nconst lancedb = require('lancedb');\nconst fs = require('fs');\nconst path = require('path');\nconst { exec } = require('child_process');\n\n// Helper function to run Python code for drift detection\nasync function detectDriftWithPython(reference_data, current_data, model_info) {\n  return new Promise((resolve, reject) => {\n    // Write data to temporary files\n    const tempReferenceFile = path.join('./temp', `reference_data_${Date.now()}.json`);\n    const tempCurrentFile = path.join('./temp', `current_data_${Date.now()}.json`);\n    const tempModelInfoFile = path.join('./temp', `model_info_${Date.now()}.json`);\n    \n    fs.writeFileSync(tempReferenceFile, JSON.stringify(reference_data));\n    fs.writeFileSync(tempCurrentFile, JSON.stringify(current_data));\n    fs.writeFileSync(tempModelInfoFile, JSON.stringify(model_info));\n    \n    // Generate Python script for drift detection\n    const pythonScript = `\nimport json\nimport numpy as np\nfrom scipy.stats import ks_2samp\nfrom sklearn.metrics.pairwise import cosine_similarity\n\n# Load data\nwith open('${tempReferenceFile}', 'r') as f:\n    reference_data = json.load(f)\n\nwith open('${tempCurrentFile}', 'r') as f:\n    current_data = json.load(f)\n\nwith open('${tempModelInfoFile}', 'r') as f:\n    model_info = json.load(f)\n\n# Extract vectors\nreference_vectors = np.array([row['vector'] for row in reference_data])\ncurrent_vectors = np.array([row['vector'] for row in current_data])\n\n# Calculate vector statistics\nref_mean = np.mean(reference_vectors, axis=0)\ncurrent_mean = np.mean(current_vectors, axis=0)\n\nref_std = np.std(reference_vectors, axis=0)\ncurrent_std = np.std(current_vectors, axis=0)\n\n# Cosine similarity between means\ncos_sim = cosine_similarity([ref_mean], [current_mean])[0][0]\n\n# Calculate distribution drift using KS test on vector norms\nref_norms = np.linalg.norm(reference_vectors, axis=1)\ncurrent_norms = np.linalg.norm(current_vectors, axis=1)\n\nks_stat, p_value = ks_2samp(ref_norms, current_norms)\n\n# Determine if drift is significant\ndrift_detected = p_value < ${drift_threshold}\n\n# Calculate dimension-wise drift for high-dimensional vectors\ndimension_drift = []\nif ref_mean.shape[0] <= 20:  # Only for reasonably sized vectors\n    for i in range(ref_mean.shape[0]):\n        dim_ks_stat, dim_p_value = ks_2samp(reference_vectors[:, i], current_vectors[:, i])\n        dimension_drift.append({\n            'dimension': i,\n            'ks_statistic': float(dim_ks_stat),\n            'p_value': float(dim_p_value),\n            'drift_detected': dim_p_value < ${drift_threshold}\n        })\n\n# Build result\ndrift_metrics = {\n    'model_id': model_info['model_id'],\n    'version': model_info['version'],\n    'timestamp': model_info['created_at'],\n    'cosine_similarity': float(cos_sim),\n    'ks_statistic': float(ks_stat),\n    'p_value': float(p_value),\n    'drift_detected': drift_detected,\n    'drift_threshold': ${drift_threshold},\n    'reference_size': len(reference_vectors),\n    'current_size': len(current_vectors),\n    'dimension_drift': dimension_drift if dimension_drift else None,\n}\n\n# Output results\nwith open('${path.join('./temp', `results_${Date.now()}.json`)}', 'w') as f:\n    json.dump(drift_metrics, f)\n`;\n    \n    // Write Python script to file\n    const scriptFile = path.join('./temp', `drift_script_${Date.now()}.py`);\n    fs.writeFileSync(scriptFile, pythonScript);\n    \n    // Execute Python script\n    exec(`python ${scriptFile}`, (error, stdout, stderr) => {\n      if (error) {\n        console.error(`Execution error: ${error}`);\n        reject(error);\n        return;\n      }\n      \n      if (stderr) {\n        console.error(`Python stderr: ${stderr}`);\n      }\n      \n      // Read results\n      const resultsFile = glob.sync(path.join('./temp', 'results_*.json'))[0];\n      if (!resultsFile) {\n        reject(new Error('Results file not found'));\n        return;\n      }\n      \n      const results = JSON.parse(fs.readFileSync(resultsFile, 'utf-8'));\n      \n      // Clean up temporary files\n      fs.unlinkSync(tempReferenceFile);\n      fs.unlinkSync(tempCurrentFile);\n      fs.unlinkSync(tempModelInfoFile);\n      fs.unlinkSync(scriptFile);\n      fs.unlinkSync(resultsFile);\n      \n      resolve(results);\n    });\n  });\n}\n\n// Function to get model from registry\nasync function getModel(db, model_id) {\n  // Open the model registry table\n  if (!db.tableNames().includes('model_registry')) {\n    throw new Error('Model registry not found');\n  }\n  \n  const registry = db.openTable('model_registry');\n  \n  // Query for the model\n  const query = registry.filter(`model_id = '${model_id}'`);\n  \n  // Get the models\n  const models = await query.toArray();\n  \n  if (models.length === 0) {\n    throw new Error(`Model ${model_id} not found`);\n  }\n  \n  // Get the latest version\n  models.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));\n  return models[0];\n}\n\n// Main execution function\nasync function detectDrift() {\n  try {\n    // Connect to LanceDB\n    const db = await lancedb.connect(lancedb_path);\n    \n    // Check if tables exist\n    if (!db.tableNames().includes(reference_table)) {\n      throw new Error(`Reference table ${reference_table} not found`);\n    }\n    \n    if (!db.tableNames().includes(current_table)) {\n      throw new Error(`Current table ${current_table} not found`);\n    }\n    \n    // Get model metadata\n    const model_info = await getModel(db, model_id);\n    \n    // Load reference and current data\n    const referenceTableObj = db.openTable(reference_table);\n    const currentTableObj = db.openTable(current_table);\n    \n    const reference_data = await referenceTableObj.toArray();\n    const current_data = await currentTableObj.toArray();\n    \n    // Detect drift\n    const drift_results = await detectDriftWithPython(reference_data, current_data, model_info);\n    \n    // Log the drift detection\n    if (db.tableNames().includes('model_monitoring')) {\n      const monitoringTable = db.openTable('model_monitoring');\n      \n      // Create a log entry\n      await monitoringTable.add([{\n        id: `drift_${Date.now()}`,\n        timestamp: new Date().toISOString(),\n        model_id: model_id,\n        version: model_info.version,\n        metric_type: 'drift',\n        metric_value: drift_results.ks_statistic,\n        threshold: drift_threshold,\n        status: drift_results.drift_detected ? 'alert' : 'normal',\n        metadata: JSON.stringify(drift_results),\n        vector: model_info.vector\n      }]);\n    }\n    \n    // Trigger retraining if drift detected and automatic retraining is enabled\n    const enableAutoRetraining = process.env.ENABLE_AUTOMATIC_RETRAINING === 'true';\n    \n    if (drift_results.drift_detected && enableAutoRetraining) {\n      // This would typically call another workflow to trigger retraining\n      console.log(`Drift detected, triggering retraining for model ${model_id}`);\n      // For now, just log it in the results\n      drift_results.retraining_triggered = true;\n    }\n    \n    return drift_results;\n  } catch (error) {\n    return {\n      status: 'error',\n      message: error.message,\n      stack: error.stack\n    };\n  }\n}\n\n// Execute the drift detection\nreturn detectDrift();"
+      },
+      "id": "4fc99ebd-fc14-4c2a-a2f1-e7ebb0ace30a",
+      "name": "Code",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [
+        450,
+        300
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "ef81ad7c-c773-41b1-a345-5f31f4b5f6c9",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        650,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Code",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {},
+  "versionId": "9ed405f1-21bb-4f5f-b73f-0b15c2d72fa6",
+  "id": "4",
+  "meta": {
+    "instanceId": "104a4d37d8df52d53fbaff292ea28e9406991bd34179d95537c3cb456b38d5bc"
+  },
+  "tags": [
+    {
+      "name": "MLOps",
+      "id": "1"
+    }
+  ]
+}
